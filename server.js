@@ -80,7 +80,7 @@ async function sendText(toNumber, message) {
       {
         number: toNumber,
         content: message,
-        send_style: "invisible",
+      
       },
       {
         headers: {
