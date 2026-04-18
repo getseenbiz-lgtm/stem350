@@ -120,7 +120,7 @@ async function getAIReply(phoneNumber, userMessage) {
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
-        model: "claude-sonnet-4-20250514",
+        model: "claude-sonnet-4-5",
         max_tokens: 300, // Keep SMS replies short
         system: SYSTEM_PROMPT,
         messages: conversations[phoneNumber],
