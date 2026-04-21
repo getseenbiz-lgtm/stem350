@@ -1,7 +1,7 @@
 {
   "name": "stem350-ai-agent",
-  "version": "1.0.0",
-  "description": "Dr. Brooks — STEM350 SMS AI Agent powered by Claude",
+  "version": "2.0.0",
+  "description": "Dr. Brooks — STEM350 SMS AI Agent v2 with memory, follow-ups, and group thread support",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "axios": "^1.6.0",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "@supabase/supabase-js": "^2.39.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.0"
