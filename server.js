@@ -275,7 +275,7 @@ app.post("/webhook", async (req, res) => {
     await updateContactLastSeen(from_number);
     const reply = await getAIReply(contactKey, incomingMessage, contact);
     // Reply to group thread or individual
-    await sendText(from_number, reply, group_id);
+    await sendText(from_number, reply, null);
   } catch (err) {
     console.error("❌ Pipeline error:", err.message);
   }
