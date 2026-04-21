@@ -183,8 +183,12 @@ async function sendText(toNumber, message, groupId = null) {
       payload.number = toNumber;
     }
 
+    const url = groupId
+      ? "https://api.sendblue.co/api/send-group-message"
+      : "https://api.sendblue.co/api/send-message";
+
     const response = await axios.post(
-      "https://api.sendblue.co/api/send-message",
+      url,
       payload,
       {
         headers: {
