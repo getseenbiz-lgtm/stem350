@@ -1,29 +1,39 @@
 const express = require("express");
 const axios = require("axios");
+const { createClient } = require("@supabase/supabase-js");
+
 const app = express();
 app.use(express.json());
 
-// ─── CONFIG ──────────────────────────────────────────────────────────────────
+// ─── CONFIG ───────────────────────────────────────────────────────────────────
 const SENDBLUE_API_KEY = process.env.SENDBLUE_API_KEY;
 const SENDBLUE_API_SECRET = process.env.SENDBLUE_API_SECRET;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const PORT = process.env.PORT || 3000;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
+const PORT = process.env.PORT || 8080;
 
-// ─── CONVERSATION MEMORY ─────────────────────────────────────────────────────
-// Stores recent messages per phone number (resets if server restarts)
-// For production, swap this with a Redis or database store
-const conversations = {};
-const MAX_HISTORY = 20; // keep last 20 messages per contact
+// ─── SUPABASE CLIENT ──────────────────────────────────────────────────────────
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// ─── DR. BROOKS SYSTEM PROMPT ────────────────────────────────────────────────
-const SYSTEM_PROMPT = `You are Dr. Brooks, a knowledgeable and warm AI wellness consultant for STEM350 — a regenerative medicine membership program that provides cutting-edge stem cell therapy.
+// ─── DR. BROOKS SYSTEM PROMPT ─────────────────────────────────────────────────
+function buildSystemPrompt(contact) {
+  const isMember = contact?.is_member === true;
+  const name = contact?.name || null;
 
-## YOUR ROLE
-You handle inbound SMS inquiries. Your job is to:
-1. Answer questions about stem cell therapy and the STEM350 program
-2. Overcome objections with empathy and facts
-3. Guide interested prospects toward booking a consultation or signing up
-4. Send payment and booking links at the right moment
+  const memberContext = isMember
+    ? `This person is a CURRENT MEMBER of STEM350. Their name is ${name || "unknown"}. 
+       Greet them warmly by name, skip the sales pitch entirely. 
+       Help them with questions about their membership, treatments, scheduling, or anything else they need.
+       Be like a helpful, knowledgeable friend who already knows them.`
+    : `This person is a PROSPECT — not yet a member. 
+       ${name ? `Their name is ${name}.` : "You don't know their name yet — try to learn it naturally."}
+       Your goal is to educate, build trust, overcome objections, and guide them toward booking or signing up.`;
+
+  return `You are Dr. Brooks, a knowledgeable and warm AI wellness consultant for STEM350 — a regenerative medicine membership program that provides cutting-edge stem cell therapy.
+
+## WHO YOU'RE TALKING TO
+${memberContext}
 
 ## THE STEM350 PROGRAM
 - **Price**: $350/month membership
@@ -39,20 +49,20 @@ You handle inbound SMS inquiries. Your job is to:
 - Always say treatments "may help" or "many clients experience..." not "will cure"
 - If someone is in crisis or needs emergency help, tell them to call 911 or their doctor immediately
 - Never collect credit card numbers via text — always use the Stripe link
+- This may be a group thread — if multiple people are talking, address the prospect directly
 
-## CONVERSATION FLOW
+## CONVERSATION FLOW (PROSPECTS ONLY)
 1. **Greeting**: Introduce yourself, ask what brought them to STEM350
 2. **Discovery**: Learn what they're dealing with (pain, fatigue, injury, aging, etc.)
 3. **Education**: Explain how stem cell therapy may help their situation
 4. **Overcome objections**: Handle concerns about cost, safety, FDA, insurance, etc.
 5. **Close**: Offer to book a free consultation OR send the signup link if they're ready
-6. **Follow-up**: If they go quiet, check in warmly once
 
 ## COMMON OBJECTIONS & HOW TO HANDLE THEM
 - "Is this FDA approved?" → Stem cell therapies are an evolving area of medicine. Our treatments use your body's own regenerative processes. Many clients see meaningful results. I'd love to share more — would a quick call help?
 - "Is it covered by insurance?" → Most regenerative medicine programs aren't covered by insurance yet, which is why we built STEM350 as an affordable membership. At $350/month it's often less than a single specialist copay and PT combined.
-- "How do I know it works?" → Great question. Results vary, but many of our members report reduced pain, better mobility, and more energy. Happy to share what others have experienced. Want to book a free consult first?
-- "That's expensive" → I understand. Think of it as about $11/day for access to treatments that many people pay $2,000–$5,000 per session for elsewhere. And you get 2 full treatments a year included.
+- "How do I know it works?" → Results vary, but many of our members report reduced pain, better mobility, and more energy. Want to book a free consult first?
+- "That's expensive" → Think of it as about $11/day for access to treatments that many people pay $2,000–$5,000 per session for elsewhere. And you get 2 full treatments a year included.
 - "I need to think about it" → Of course! Can I ask what's your biggest hesitation? I want to make sure you have everything you need to feel confident.
 
 ## WHEN TO SEND LINKS
@@ -63,25 +73,119 @@ You handle inbound SMS inquiries. Your job is to:
 ## WHAT YOU DON'T KNOW YET
 Additional treatment details, specific conditions treated, and testimonials will be added soon. If asked something specific you don't know, say: "That's a great question — let me have one of our team members follow up with you directly on that. Can I grab your best email?"
 
-## TONE EXAMPLES
-❌ "As an AI language model, I cannot provide medical advice..."
-✅ "That's exactly what stem cell therapy may be able to help with. Many of our members dealing with similar issues have seen real improvements. Want to start with a free consult?"
-
-❌ "Please visit our website for more information."
-✅ "Here's your booking link to grab a free consult — takes 2 minutes: https://stem350.com/book"
-
 Remember: You are Dr. Brooks. Warm, confident, helpful. Move the conversation forward.`;
+}
+
+// ─── FOLLOW-UP MESSAGES ───────────────────────────────────────────────────────
+const FOLLOWUP_MESSAGES = [
+  "Hey! It's Dr. Brooks from STEM350 👋 Just checking in — did you have any questions about stem cell therapy? Happy to help anytime.",
+  "Hi, Dr. Brooks here again! I know life gets busy. If you're still curious about STEM350, I'd love to chat. Even a free consult can be really eye-opening: https://stem350.com/book",
+  "Hey, one more check-in from Dr. Brooks at STEM350 🙏 Many people dealing with pain or inflammation find our program really helpful. If you'd like to learn more, just reply and I'm here!",
+  "Last check-in from Dr. Brooks — I don't want to be a bother! If you're ever ready to explore stem cell therapy, we're here for you. Wishing you great health either way 💚",
+];
+
+// ─── GET OR CREATE CONTACT ────────────────────────────────────────────────────
+async function getOrCreateContact(phoneNumber) {
+  try {
+    let { data, error } = await supabase
+      .from("contacts")
+      .select("*")
+      .eq("phone", phoneNumber)
+      .single();
+
+    if (error && error.code === "PGRST116") {
+      // Not found — create new contact
+      const { data: newContact, error: insertError } = await supabase
+        .from("contacts")
+        .insert([
+          {
+            phone: phoneNumber,
+            is_member: false,
+            follow_up_count: 0,
+            last_contacted_at: new Date().toISOString(),
+            created_at: new Date().toISOString(),
+          },
+        ])
+        .select()
+        .single();
+
+      if (insertError) throw insertError;
+      return newContact;
+    }
+
+    if (error) throw error;
+    return data;
+  } catch (err) {
+    console.error("❌ getOrCreateContact error:", err.message);
+    return null;
+  }
+}
+
+// ─── UPDATE CONTACT LAST SEEN ─────────────────────────────────────────────────
+async function updateContactLastSeen(phoneNumber) {
+  try {
+    await supabase
+      .from("contacts")
+      .update({
+        last_contacted_at: new Date().toISOString(),
+        follow_up_count: 0, // reset follow-up count when they respond
+      })
+      .eq("phone", phoneNumber);
+  } catch (err) {
+    console.error("❌ updateContactLastSeen error:", err.message);
+  }
+}
+
+// ─── GET CONVERSATION HISTORY ─────────────────────────────────────────────────
+async function getHistory(phoneNumber) {
+  try {
+    const { data, error } = await supabase
+      .from("messages")
+      .select("role, content")
+      .eq("phone", phoneNumber)
+      .order("created_at", { ascending: true })
+      .limit(20);
+
+    if (error) throw error;
+    return data || [];
+  } catch (err) {
+    console.error("❌ getHistory error:", err.message);
+    return [];
+  }
+}
+
+// ─── SAVE MESSAGE ─────────────────────────────────────────────────────────────
+async function saveMessage(phoneNumber, role, content) {
+  try {
+    await supabase.from("messages").insert([
+      {
+        phone: phoneNumber,
+        role,
+        content,
+        created_at: new Date().toISOString(),
+      },
+    ]);
+  } catch (err) {
+    console.error("❌ saveMessage error:", err.message);
+  }
+}
 
 // ─── SEND A TEXT VIA SENDBLUE ─────────────────────────────────────────────────
-async function sendText(toNumber, message) {
+async function sendText(toNumber, message, groupId = null) {
   try {
+    const payload = {
+      content: message,
+    };
+
+    if (groupId) {
+      payload.group_id = groupId;
+    } else {
+      payload.number = toNumber;
+    }
+
     const response = await axios.post(
       "https://api.sendblue.co/api/send-message",
-      {
-        number: toNumber,
-        content: message,
-      
-      },
+      payload,
       {
         headers: {
           "sb-api-key-id": SENDBLUE_API_KEY,
@@ -90,7 +194,7 @@ async function sendText(toNumber, message) {
         },
       }
     );
-    console.log(`✅ Sent to ${toNumber}:`, message.substring(0, 60) + "...");
+    console.log(`✅ Sent to ${groupId || toNumber}`);
     return response.data;
   } catch (err) {
     console.error("❌ Sendblue send error:", err.response?.data || err.message);
@@ -98,32 +202,21 @@ async function sendText(toNumber, message) {
   }
 }
 
-// ─── GET AI REPLY FROM CLAUDE ─────────────────────────────────────────────────
-async function getAIReply(phoneNumber, userMessage) {
-  // Initialize conversation history if new contact
-  if (!conversations[phoneNumber]) {
-    conversations[phoneNumber] = [];
-  }
+// ─── GET AI REPLY ─────────────────────────────────────────────────────────────
+async function getAIReply(phoneNumber, userMessage, contact) {
+  const history = await getHistory(phoneNumber);
 
-  // Add user message to history
-  conversations[phoneNumber].push({
-    role: "user",
-    content: userMessage,
-  });
-
-  // Trim history to prevent token overflow
-  if (conversations[phoneNumber].length > MAX_HISTORY) {
-    conversations[phoneNumber] = conversations[phoneNumber].slice(-MAX_HISTORY);
-  }
+  // Add new user message to history
+  history.push({ role: "user", content: userMessage });
 
   try {
     const response = await axios.post(
       "https://api.anthropic.com/v1/messages",
       {
         model: "claude-sonnet-4-5",
-        max_tokens: 300, // Keep SMS replies short
-        system: SYSTEM_PROMPT,
-        messages: conversations[phoneNumber],
+        max_tokens: 300,
+        system: buildSystemPrompt(contact),
+        messages: history,
       },
       {
         headers: {
@@ -136,11 +229,9 @@ async function getAIReply(phoneNumber, userMessage) {
 
     const reply = response.data.content[0].text;
 
-    // Add assistant reply to history
-    conversations[phoneNumber].push({
-      role: "assistant",
-      content: reply,
-    });
+    // Save both messages to database
+    await saveMessage(phoneNumber, "user", userMessage);
+    await saveMessage(phoneNumber, "assistant", reply);
 
     return reply;
   } catch (err) {
@@ -149,60 +240,139 @@ async function getAIReply(phoneNumber, userMessage) {
   }
 }
 
-// ─── WEBHOOK ENDPOINT ─────────────────────────────────────────────────────────
+// ─── WEBHOOK ──────────────────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
-  // Always respond 200 immediately so Sendblue doesn't retry
   res.sendStatus(200);
 
-  const { number, content, media_url } = req.body;
+  const { number, content, media_url, group_id } = req.body;
 
-  // Ignore empty or system messages
-  if (!number || (!content && !media_url)) {
-    console.log("⚠️ Received empty or system message, skipping.");
-    return;
-  }
+  if (!content && !media_url) return;
+
+  // For group threads, use group_id as the key; otherwise use phone number
+  const contactKey = number || group_id;
+  if (!contactKey) return;
 
   const incomingMessage = content || "[Image received]";
-  console.log(`📱 Incoming from ${number}: ${incomingMessage}`);
+  console.log(`📱 Incoming from ${contactKey}: ${incomingMessage}`);
 
   try {
-    const reply = await getAIReply(number, incomingMessage);
-    await sendText(number, reply);
+    const contact = await getOrCreateContact(contactKey);
+    await updateContactLastSeen(contactKey);
+    const reply = await getAIReply(contactKey, incomingMessage, contact);
+    await sendText(number, reply, group_id || null);
   } catch (err) {
     console.error("❌ Pipeline error:", err.message);
   }
 });
 
-// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
-app.get("/", (req, res) => {
-  res.json({
-    status: "🟢 Dr. Brooks is online",
-    agent: "STEM350 AI Agent",
-    activeConversations: Object.keys(conversations).length,
-  });
-});
+// ─── MARK AS MEMBER ───────────────────────────────────────────────────────────
+app.post("/member", async (req, res) => {
+  const { phone, name } = req.body;
+  if (!phone) return res.status(400).json({ error: "phone required" });
 
-// ─── MANUAL MESSAGE ENDPOINT (for testing) ───────────────────────────────────
-app.post("/test", async (req, res) => {
-  const { number, message } = req.body;
-  if (!number || !message) {
-    return res.status(400).json({ error: "number and message required" });
-  }
   try {
-    const reply = await getAIReply(number, message);
-    res.json({ reply });
+    const { data, error } = await supabase
+      .from("contacts")
+      .upsert([{ phone, name, is_member: true }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, contact: data });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
+// ─── FOLLOW-UP SCHEDULER ─────────────────────────────────────────────────────
+// Runs every hour and checks who needs a follow-up
+async function runFollowUpScheduler() {
+  console.log("⏰ Running follow-up scheduler...");
+
+  const followUpDays = [1, 3, 7, 14];
+
+  try {
+    // Get all non-member contacts who haven't been followed up to completion
+    const { data: contacts, error } = await supabase
+      .from("contacts")
+      .select("*")
+      .eq("is_member", false)
+      .lt("follow_up_count", 4);
+
+    if (error) throw error;
+    if (!contacts || contacts.length === 0) return;
+
+    const now = new Date();
+
+    for (const contact of contacts) {
+      const lastContacted = new Date(contact.last_contacted_at);
+      const daysSince = Math.floor(
+        (now - lastContacted) / (1000 * 60 * 60 * 24)
+      );
+      const followUpIndex = contact.follow_up_count;
+
+      if (
+        followUpIndex < followUpDays.length &&
+        daysSince >= followUpDays[followUpIndex]
+      ) {
+        const message = FOLLOWUP_MESSAGES[followUpIndex];
+
+        try {
+          await sendText(contact.phone, message);
+          await saveMessage(contact.phone, "assistant", message);
+
+          // Update follow-up count and last contacted
+          await supabase
+            .from("contacts")
+            .update({
+              follow_up_count: followUpIndex + 1,
+              last_contacted_at: now.toISOString(),
+            })
+            .eq("phone", contact.phone);
+
+          console.log(
+            `📤 Follow-up #${followUpIndex + 1} sent to ${contact.phone}`
+          );
+        } catch (sendErr) {
+          console.error(
+            `❌ Failed to send follow-up to ${contact.phone}:`,
+            sendErr.message
+          );
+        }
+      }
+    }
+  } catch (err) {
+    console.error("❌ Scheduler error:", err.message);
+  }
+}
+
+// Run scheduler every hour
+setInterval(runFollowUpScheduler, 60 * 60 * 1000);
+
+// ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
+app.get("/", async (req, res) => {
+  const { count } = await supabase
+    .from("contacts")
+    .select("*", { count: "exact", head: true });
+
+  res.json({
+    status: "🟢 Dr. Brooks is online",
+    agent: "STEM350 AI Agent v2",
+    totalContacts: count || 0,
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`
-🧬 STEM350 AI Agent — Dr. Brooks
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧬 STEM350 AI Agent v2 — Dr. Brooks
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✅ Server running on port ${PORT}
-📡 Webhook endpoint: POST /webhook
-🧪 Test endpoint: POST /test
+🧠 Memory: Supabase
+📅 Follow-ups: Day 1, 3, 7, 14
+👥 Group threads: Supported
 💚 Health check: GET /
 `);
+
+  // Run scheduler on startup too
+  runFollowUpScheduler();
 });
