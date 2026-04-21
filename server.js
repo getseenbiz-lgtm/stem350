@@ -244,22 +244,33 @@ async function getAIReply(phoneNumber, userMessage, contact) {
 app.post("/webhook", async (req, res) => {
   res.sendStatus(200);
 
-  const { number, content, media_url, group_id } = req.body;
+  // Log full payload so we can see exact field names from Sendblue
+  console.log("📦 Webhook payload:", JSON.stringify(req.body));
+
+  const body = req.body;
+  const content = body.content;
+  const media_url = body.media_url;
+
+  // Detect all possible group ID field names Sendblue might use
+  const group_id = body.group_id || body.groupId || body.group || null;
+
+  // Sender's phone number
+  const number = body.number || body.from || body.sender || null;
 
   if (!content && !media_url) return;
 
-  // For group threads, use group_id as the key; otherwise use phone number
-  const contactKey = number || group_id;
+  // For group threads use group_id, otherwise individual phone number
+  const contactKey = group_id || number;
   if (!contactKey) return;
 
   const incomingMessage = content || "[Image received]";
-  console.log(`📱 Incoming from ${contactKey}: ${incomingMessage}`);
+  console.log(`📱 Incoming from ${contactKey} (group:${!!group_id}): ${incomingMessage}`);
 
   try {
     const contact = await getOrCreateContact(contactKey);
     await updateContactLastSeen(contactKey);
     const reply = await getAIReply(contactKey, incomingMessage, contact);
-    await sendText(number, reply, group_id || null);
+    await sendText(number, reply, group_id);
   } catch (err) {
     console.error("❌ Pipeline error:", err.message);
   }
